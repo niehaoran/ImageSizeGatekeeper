@@ -1,0 +1,2 @@
+# ImageSizeGatekeeper
+限制k8s拉取最大容器大小的Admission Webhook组件
