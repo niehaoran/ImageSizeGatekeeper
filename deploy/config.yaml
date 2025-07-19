@@ -14,12 +14,8 @@ data:
       ],
       "namespaceLimits": [
         {
-          "pattern": "default",
-          "maxSizeGB": 10
-        },
-        {
-          "pattern": "user-.*",
-          "maxSizeGB": 5
+          "pattern": "test",
+          "maxSizeGB": 0.01
         }
       ],
       "proxy": {

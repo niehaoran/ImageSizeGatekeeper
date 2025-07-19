@@ -66,8 +66,8 @@ type Config struct {
 const (
 	// 代理URL文件名
 	ProxyURLFile = "proxy-url"
-	// 仓库认证信息目录
-	RegistryCredsDir = "registry-credentials"
+	// 仓库认证信息前缀
+	RegistryCredsPrefix = "registry_credentials_"
 )
 
 // NewConfig 创建一个新的配置实例
@@ -100,43 +100,40 @@ func (c *Config) LoadSecrets(secretsDir string) error {
 	}
 
 	// 加载仓库认证信息
-	credsDir := filepath.Join(secretsDir, RegistryCredsDir)
-	if _, err := os.Stat(credsDir); err == nil {
-		// 读取目录中的所有文件
-		files, err := ioutil.ReadDir(credsDir)
-		if err != nil {
-			return fmt.Errorf("读取仓库认证目录失败: %v", err)
+	// 清空当前认证信息
+	c.RegistryCredentials = []RegistryCredential{}
+
+	// 查找所有以RegistryCredsPrefix开头的文件
+	files, err := filepath.Glob(filepath.Join(secretsDir, RegistryCredsPrefix+"*"))
+	if err != nil {
+		return fmt.Errorf("查找仓库认证信息文件失败: %v", err)
+	}
+
+	for _, filePath := range files {
+		// 从文件名提取registry
+		fileName := filepath.Base(filePath)
+		if !strings.HasPrefix(fileName, RegistryCredsPrefix) {
+			continue
 		}
 
-		// 清空当前认证信息
-		c.RegistryCredentials = []RegistryCredential{}
+		// 从文件名获取registry (去掉前缀)
+		registry := strings.TrimPrefix(fileName, RegistryCredsPrefix)
 
-		// 遍历每个文件
-		for _, file := range files {
-			if file.IsDir() {
-				continue
-			}
+		// 读取认证信息
+		credData, err := ioutil.ReadFile(filePath)
+		if err != nil {
+			return fmt.Errorf("读取仓库认证信息失败 %s: %v", registry, err)
+		}
 
-			// 文件名即为仓库地址
-			registry := file.Name()
-			credPath := filepath.Join(credsDir, registry)
-
-			// 读取认证信息
-			credData, err := ioutil.ReadFile(credPath)
-			if err != nil {
-				return fmt.Errorf("读取仓库认证信息失败 %s: %v", registry, err)
-			}
-
-			// 解析用户名:密码格式
-			credString := strings.TrimSpace(string(credData))
-			credParts := strings.SplitN(credString, ":", 2)
-			if len(credParts) == 2 {
-				c.RegistryCredentials = append(c.RegistryCredentials, RegistryCredential{
-					Registry: registry,
-					Username: credParts[0],
-					Password: credParts[1],
-				})
-			}
+		// 解析用户名:密码格式
+		credString := strings.TrimSpace(string(credData))
+		credParts := strings.SplitN(credString, ":", 2)
+		if len(credParts) == 2 {
+			c.RegistryCredentials = append(c.RegistryCredentials, RegistryCredential{
+				Registry: registry,
+				Username: credParts[0],
+				Password: credParts[1],
+			})
 		}
 	}
 
