@@ -7,7 +7,7 @@ metadata:
     app: imagesizegatekeeper
 spec:
   ports:
-    - port: 443
+    - port: 8443
       targetPort: 8443
       protocol: TCP
   selector:

@@ -15,7 +15,7 @@ webhooks:
         namespace: imagesizegatekeeper
         name: imagesizegatekeeper
         path: "/validate"
-        port: 443
+        port: 8443
       # 使用cert-manager自动注入caBundle，这里无需手动设置
     rules:
       - operations: ["CREATE"]
