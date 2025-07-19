@@ -41,6 +41,8 @@ func NewImageSizeWebhook(cfg *config.Config) *ImageSizeWebhook {
 
 // 处理/validate路径的HTTP请求
 func (w *ImageSizeWebhook) ServeHTTP(writer http.ResponseWriter, request *http.Request) {
+	fmt.Printf("收到请求: %s %s\n", request.Method, request.URL.Path)
+
 	if request.URL.Path != "/validate" {
 		http.Error(writer, "无效的路径", http.StatusNotFound)
 		return
@@ -79,6 +81,11 @@ func (w *ImageSizeWebhook) ServeHTTP(writer http.ResponseWriter, request *http.R
 		return
 	}
 
+	fmt.Printf("解析请求成功: UID=%s, 资源类型=%s, 命名空间=%s\n",
+		admissionReview.Request.UID,
+		admissionReview.Request.Kind.Kind,
+		admissionReview.Request.Namespace)
+
 	// 创建响应
 	admissionResponse := w.validate(admissionReview.Request)
 
@@ -88,12 +95,31 @@ func (w *ImageSizeWebhook) ServeHTTP(writer http.ResponseWriter, request *http.R
 		Response: admissionResponse,
 	}
 
+	// 确保设置了APIVersion和Kind
+	if response.TypeMeta.APIVersion == "" {
+		response.TypeMeta.APIVersion = "admission.k8s.io/v1"
+	}
+	if response.TypeMeta.Kind == "" {
+		response.TypeMeta.Kind = "AdmissionReview"
+	}
+
+	// 确保设置了请求UID (这一步应该是冗余的，但为了确保安全)
+	if response.Response != nil {
+		response.Response.UID = admissionReview.Request.UID
+		fmt.Printf("返回响应: UID=%s, allowed=%v\n",
+			response.Response.UID,
+			response.Response.Allowed)
+	}
+
 	// 序列化并返回响应
 	resp, err := json.Marshal(response)
 	if err != nil {
 		http.Error(writer, fmt.Sprintf("序列化响应失败: %v", err), http.StatusInternalServerError)
 		return
 	}
+
+	// 打印序列化后的响应用于调试
+	fmt.Printf("序列化响应: %s\n", string(resp))
 
 	// 设置响应头
 	writer.Header().Set("Content-Type", "application/json")
@@ -110,6 +136,7 @@ func (w *ImageSizeWebhook) validate(request *admissionv1.AdmissionRequest) *admi
 	// 只处理Pod资源
 	if request.Kind.Kind != "Pod" {
 		return &admissionv1.AdmissionResponse{
+			UID:     request.UID, // 添加UID字段
 			Allowed: true,
 			Result: &metav1.Status{
 				Message: "非Pod资源，跳过验证",
@@ -121,6 +148,7 @@ func (w *ImageSizeWebhook) validate(request *admissionv1.AdmissionRequest) *admi
 	var pod corev1.Pod
 	if err := json.Unmarshal(request.Object.Raw, &pod); err != nil {
 		return &admissionv1.AdmissionResponse{
+			UID:     request.UID, // 添加UID字段
 			Allowed: false,
 			Result: &metav1.Status{
 				Message: fmt.Sprintf("解析Pod对象失败: %v", err),
@@ -133,6 +161,7 @@ func (w *ImageSizeWebhook) validate(request *admissionv1.AdmissionRequest) *admi
 	if !hasLimit {
 		// 如果没有限制，允许创建
 		return &admissionv1.AdmissionResponse{
+			UID:     request.UID, // 添加UID字段
 			Allowed: true,
 			Result: &metav1.Status{
 				Message: fmt.Sprintf("命名空间 %s 没有设置大小限制", request.Namespace),
@@ -146,6 +175,7 @@ func (w *ImageSizeWebhook) validate(request *admissionv1.AdmissionRequest) *admi
 		imageInfo, err := w.registryClient.GetImageSize(container.Image)
 		if err != nil {
 			return &admissionv1.AdmissionResponse{
+				UID:     request.UID, // 添加UID字段
 				Allowed: false,
 				Result: &metav1.Status{
 					Message: fmt.Sprintf("获取镜像 %s 大小失败: %v", container.Image, err),
@@ -156,6 +186,7 @@ func (w *ImageSizeWebhook) validate(request *admissionv1.AdmissionRequest) *admi
 		// 检查大小是否超过限制
 		if imageInfo.SizeGB > maxSizeGB {
 			return &admissionv1.AdmissionResponse{
+				UID:     request.UID, // 添加UID字段
 				Allowed: false,
 				Result: &metav1.Status{
 					Message: fmt.Sprintf(
@@ -173,6 +204,7 @@ func (w *ImageSizeWebhook) validate(request *admissionv1.AdmissionRequest) *admi
 		imageInfo, err := w.registryClient.GetImageSize(container.Image)
 		if err != nil {
 			return &admissionv1.AdmissionResponse{
+				UID:     request.UID, // 添加UID字段
 				Allowed: false,
 				Result: &metav1.Status{
 					Message: fmt.Sprintf("获取初始化容器镜像 %s 大小失败: %v", container.Image, err),
@@ -183,6 +215,7 @@ func (w *ImageSizeWebhook) validate(request *admissionv1.AdmissionRequest) *admi
 		// 检查大小是否超过限制
 		if imageInfo.SizeGB > maxSizeGB {
 			return &admissionv1.AdmissionResponse{
+				UID:     request.UID, // 添加UID字段
 				Allowed: false,
 				Result: &metav1.Status{
 					Message: fmt.Sprintf(
@@ -196,6 +229,7 @@ func (w *ImageSizeWebhook) validate(request *admissionv1.AdmissionRequest) *admi
 
 	// 所有检查都通过，允许创建
 	return &admissionv1.AdmissionResponse{
+		UID:     request.UID, // 添加UID字段
 		Allowed: true,
 		Result: &metav1.Status{
 			Message: "所有镜像大小都在限制范围内",

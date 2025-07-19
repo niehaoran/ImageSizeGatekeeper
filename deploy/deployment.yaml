@@ -17,7 +17,7 @@ spec:
     spec:
       containers:
         - name: imagesizegatekeeper
-          image: imagesizegatekeeper:latest
+          image: docker.1ms.run/niehaoran/imagesizegatekeeper:latest
           imagePullPolicy: Always
           args:
             - "--port=8443"
