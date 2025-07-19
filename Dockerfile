@@ -2,6 +2,9 @@ FROM golang:1.21 as builder
 
 WORKDIR /workspace
 
+# 设置Go模块代理
+ENV GOPROXY=https://goproxy.cn,direct
+
 # 复制go模块文件
 COPY go.mod go.sum ./
 RUN go mod download
