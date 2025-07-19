@@ -1,0 +1,22 @@
+apiVersion: cert-manager.io/v1
+kind: Certificate
+metadata:
+  name: imagesizegatekeeper-cert
+  namespace: imagesizegatekeeper
+spec:
+  secretName: imagesizegatekeeper-certs
+  duration: 8760h # 1年
+  renewBefore: 720h # 30天
+  subject:
+    organizations:
+      - imagesizegatekeeper
+  commonName: imagesizegatekeeper.imagesizegatekeeper.svc
+  dnsNames:
+    - imagesizegatekeeper
+    - imagesizegatekeeper.imagesizegatekeeper
+    - imagesizegatekeeper.imagesizegatekeeper.svc
+    - imagesizegatekeeper.imagesizegatekeeper.svc.cluster.local
+  issuerRef:
+    name: webhook-ca-issuer # 使用专门为Webhook创建的CA Issuer
+    kind: ClusterIssuer
+    group: cert-manager.io

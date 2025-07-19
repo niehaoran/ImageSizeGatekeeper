@@ -1,0 +1,29 @@
+apiVersion: admissionregistration.k8s.io/v1
+kind: ValidatingWebhookConfiguration
+metadata:
+  name: imagesizegatekeeper
+  annotations:
+    cert-manager.io/inject-ca-from: "imagesizegatekeeper/imagesizegatekeeper-cert"
+webhooks:
+  - name: imagesizegatekeeper.imagesizegatekeeper.svc
+    sideEffects: None
+    admissionReviewVersions: ["v1"]
+    timeoutSeconds: 5
+    failurePolicy: Fail
+    clientConfig:
+      service:
+        namespace: imagesizegatekeeper
+        name: imagesizegatekeeper
+        path: "/validate"
+        port: 443
+      # 使用cert-manager自动注入caBundle，这里无需手动设置
+    rules:
+      - operations: ["CREATE"]
+        apiGroups: [""]
+        apiVersions: ["v1"]
+        resources: ["pods"]
+    namespaceSelector:
+      matchExpressions:
+        - key: kubernetes.io/metadata.name
+          operator: NotIn
+          values: ["kube-system", "imagesizegatekeeper"]

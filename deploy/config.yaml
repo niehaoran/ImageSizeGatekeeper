@@ -1,0 +1,29 @@
+apiVersion: v1
+kind: ConfigMap
+metadata:
+  name: imagesizegatekeeper-config
+  namespace: imagesizegatekeeper
+data:
+  config.json: |
+    {
+      "registryMappings": [
+        {
+          "userRegistry": "docker.1ms.run",
+          "actualRegistry": "docker.io"
+        }
+      ],
+      "namespaceLimits": [
+        {
+          "pattern": "default",
+          "maxSizeGB": 10
+        },
+        {
+          "pattern": "user-.*",
+          "maxSizeGB": 5
+        }
+      ],
+      "proxy": {
+        "enabled": false,
+        "url": ""
+      }
+    }

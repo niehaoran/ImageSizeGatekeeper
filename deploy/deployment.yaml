@@ -1,0 +1,70 @@
+apiVersion: apps/v1
+kind: Deployment
+metadata:
+  name: imagesizegatekeeper
+  namespace: imagesizegatekeeper
+  labels:
+    app: imagesizegatekeeper
+spec:
+  replicas: 2
+  selector:
+    matchLabels:
+      app: imagesizegatekeeper
+  template:
+    metadata:
+      labels:
+        app: imagesizegatekeeper
+    spec:
+      containers:
+        - name: imagesizegatekeeper
+          image: imagesizegatekeeper:latest
+          imagePullPolicy: Always
+          args:
+            - "--port=8443"
+            - "--tlsCertFile=/etc/webhook/certs/tls.crt"
+            - "--tlsKeyFile=/etc/webhook/certs/tls.key"
+            - "--configFile=/etc/webhook/config/config.json"
+            - "--secretsDir=/etc/webhook/secrets"
+          ports:
+            - containerPort: 8443
+          volumeMounts:
+            - name: webhook-certs
+              mountPath: /etc/webhook/certs
+              readOnly: true
+            - name: webhook-config
+              mountPath: /etc/webhook/config
+              readOnly: true
+            - name: webhook-secrets
+              mountPath: /etc/webhook/secrets
+              readOnly: true
+          resources:
+            limits:
+              cpu: "500m"
+              memory: "128Mi"
+            requests:
+              cpu: "100m"
+              memory: "64Mi"
+          livenessProbe:
+            httpGet:
+              path: /healthz
+              port: 8443
+              scheme: HTTPS
+            initialDelaySeconds: 5
+            periodSeconds: 10
+          readinessProbe:
+            httpGet:
+              path: /healthz
+              port: 8443
+              scheme: HTTPS
+            initialDelaySeconds: 5
+            periodSeconds: 10
+      volumes:
+        - name: webhook-certs
+          secret:
+            secretName: imagesizegatekeeper-certs
+        - name: webhook-config
+          configMap:
+            name: imagesizegatekeeper-config
+        - name: webhook-secrets
+          secret:
+            secretName: imagesizegatekeeper-secrets
