@@ -14,7 +14,7 @@ COPY pkg/ pkg/
 RUN CGO_ENABLED=0 GOOS=linux GOARCH=amd64 go build -a -o imagesizegatekeeper cmd/main.go
 
 # 使用轻量级的基础镜像
-FROM alpine:3.19
+FROM alpine:3.17
 
 # 安装CA证书
 RUN apk --no-cache add ca-certificates
