@@ -1,50 +1,48 @@
 #!/bin/bash
 
-# 设置命名空间
-NAMESPACE=imagesizegatekeeper
+set -e
 
-# 创建命名空间
-kubectl create namespace ${NAMESPACE} --dry-run=client -o yaml | kubectl apply -f -
+NAMESPACE="imagesizegatekeeper"
+DEPLOY_PROXY=false
 
-# 部署基础资源
-echo "部署基础资源..."
-kubectl apply -f deploy/namespace.yaml
-kubectl apply -f deploy/config.yaml
-kubectl apply -f deploy/secrets.yaml
+# 解析参数
+while [[ "$#" -gt 0 ]]; do
+    case $1 in
+        --deploy-proxy) DEPLOY_PROXY=true; shift ;;
+        *) echo "未知选项: $1"; exit 1 ;;
+    esac
+done
 
-# 创建自签名CA Issuer
-echo "创建自签名CA Issuer..."
-kubectl apply -f deploy/self-signed-issuer.yaml
+# 创建命名空间（如果不存在）
+kubectl get namespace $NAMESPACE > /dev/null 2>&1 || kubectl create namespace $NAMESPACE
 
-# 等待CA Issuer就绪
-echo "等待CA Issuer就绪..."
-sleep 5
-kubectl wait --for=condition=Ready --timeout=60s clusterissuer webhook-ca-issuer
+echo "正在部署 ImageSizeGatekeeper..."
 
-# 部署证书资源
-echo "配置证书资源..."
-kubectl apply -f deploy/certificate.yaml
+# 部署基础组件
+kubectl apply -f $(dirname "$0")/namespace.yaml
+kubectl apply -f $(dirname "$0")/config.yaml
+kubectl apply -f $(dirname "$0")/secrets.yaml
+kubectl apply -f $(dirname "$0")/self-signed-issuer.yaml
+kubectl apply -f $(dirname "$0")/certificate.yaml
+kubectl apply -f $(dirname "$0")/deployment.yaml
+kubectl apply -f $(dirname "$0")/service.yaml
+kubectl apply -f $(dirname "$0")/webhook.yaml
 
-# 等待证书生成
-echo "等待证书生成..."
-kubectl wait --for=condition=Ready --timeout=60s certificate imagesizegatekeeper-cert -n ${NAMESPACE}
+# 如果需要部署代理，则部署代理组件
+if [ "$DEPLOY_PROXY" = true ]; then
+    echo "正在部署 V2Ray 代理..."
+    
+    # 检查代理部署脚本是否存在
+    if [ -f "$(dirname "$0")/proxy/deploy.sh" ]; then
+        bash "$(dirname "$0")/proxy/deploy.sh"
+    else
+        echo "错误：找不到代理部署脚本 $(dirname "$0")/proxy/deploy.sh"
+        exit 1
+    fi
+    
+    echo "V2Ray 代理部署完成"
+fi
 
-# 部署应用程序资源
-echo "部署应用程序..."
-kubectl apply -f deploy/deployment.yaml
-kubectl apply -f deploy/service.yaml
-
-# 部署Webhook配置
-echo "部署Webhook配置..."
-kubectl apply -f deploy/webhook.yaml
-
-# 查看部署状态
-echo "等待部署完成..."
-sleep 5
-kubectl get pods -n ${NAMESPACE}
-
-# 检查证书状态
-echo "检查证书状态..."
-kubectl get certificate -n ${NAMESPACE}
-
-echo "部署完成！请确保Pod已成功运行且证书已就绪。" 
+echo "ImageSizeGatekeeper 部署完成!"
+echo "可以使用以下命令查看Pod状态:"
+echo "  kubectl get pods -n $NAMESPACE" 

@@ -4,22 +4,34 @@ metadata:
   name: imagesizegatekeeper-config
   namespace: imagesizegatekeeper
 data:
-  config.json: |
-    {
-      "registryMappings": [
-        {
-          "userRegistry": "docker.1ms.run",
-          "actualRegistry": "docker.io"
-        }
-      ],
-      "namespaceLimits": [
-        {
-          "pattern": "test",
-          "maxSizeGB": 0.01
-        }
-      ],
-      "proxy": {
-        "enabled": false,
-        "url": ""
-      }
-    }
+  config.yaml: |
+    # 仓库映射配置
+    registryMappings:
+      # 用户使用的仓库地址 -> 实际请求API的仓库地址
+      - userRegistry: "docker.io"
+        actualRegistry: "registry-1.docker.io"
+      - userRegistry: "gcr.io"
+        actualRegistry: "gcr.io"
+
+    # 命名空间大小限制配置
+    namespaceLimits:
+      # 命名空间匹配模式（正则表达式）和对应的大小限制（GB）
+      - pattern: "^prod-.*$"
+        maxSizeGB: 5.0
+      - pattern: "^dev-.*$"
+        maxSizeGB: 10.0
+      - pattern: "^test-.*$"
+        maxSizeGB: 15.0
+      - pattern: ".*"
+        maxSizeGB: 8.0
+
+    # 代理配置
+    proxy:
+      # 是否启用代理
+      enabled: false
+      # 代理类型: "none", "http", "socks5"
+      type: "none"
+      # 代理URL，取决于代理类型
+      # - HTTP代理示例: http://v2ray-proxy.imagesizegatekeeper.svc.cluster.local:8080
+      # - Socks代理示例: socks5://v2ray-proxy.imagesizegatekeeper.svc.cluster.local:1080
+      url: ""

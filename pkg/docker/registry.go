@@ -11,6 +11,7 @@ import (
 	"time"
 
 	"github.com/yourusername/imagesizegatekeeper/pkg/config"
+	"golang.org/x/net/proxy"
 )
 
 // 常量定义
@@ -54,12 +55,30 @@ func NewRegistryClient(cfg *config.Config) *RegistryClient {
 	}
 
 	// 如果启用了代理，设置代理
-	proxyEnabled, proxyURL := cfg.GetProxyConfig()
+	proxyEnabled, proxyType, proxyURL := cfg.GetProxyConfig()
 	if proxyEnabled && proxyURL != "" {
-		proxy, err := url.Parse(proxyURL)
-		if err == nil {
-			client.Transport = &http.Transport{
-				Proxy: http.ProxyURL(proxy),
+		transport := &http.Transport{}
+
+		switch proxyType {
+		case "http":
+			// HTTP代理
+			proxyURLParsed, err := url.Parse(proxyURL)
+			if err == nil {
+				transport.Proxy = http.ProxyURL(proxyURLParsed)
+				client.Transport = transport
+			}
+		case "socks5":
+			// Socks5代理
+			// 从URL中提取地址
+			proxyURLParsed, err := url.Parse(proxyURL)
+			if err == nil {
+				// 创建一个拨号器
+				dialer, err := proxy.SOCKS5("tcp", proxyURLParsed.Host, nil, proxy.Direct)
+				if err == nil {
+					// 设置自定义传输
+					transport.Dial = dialer.Dial
+					client.Transport = transport
+				}
 			}
 		}
 	}

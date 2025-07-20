@@ -42,6 +42,8 @@ type NamespaceLimit struct {
 type ProxyConfig struct {
 	// 是否启用代理
 	Enabled bool `json:"enabled"`
+	// 代理类型: "none", "http", "socks5"
+	Type string `json:"type"`
 	// 代理URL
 	URL string `json:"url"`
 }
@@ -66,6 +68,8 @@ type Config struct {
 const (
 	// 代理URL文件名
 	ProxyURLFile = "proxy-url"
+	// 代理类型文件名
+	ProxyTypeFile = "proxy-type"
 	// 仓库认证信息前缀
 	RegistryCredsPrefix = "registry_credentials_"
 )
@@ -78,6 +82,8 @@ func NewConfig() *Config {
 		RegistryCredentials: []RegistryCredential{},
 		Proxy: ProxyConfig{
 			Enabled: false,
+			Type:    "none",
+			URL:     "",
 		},
 	}
 }
@@ -96,6 +102,18 @@ func (c *Config) LoadSecrets(secretsDir string) error {
 		if err == nil && len(proxyURLData) > 0 {
 			c.Proxy.URL = strings.TrimSpace(string(proxyURLData))
 			c.Proxy.Enabled = true
+		}
+	}
+
+	// 加载代理类型（如果存在）
+	proxyTypePath := filepath.Join(secretsDir, ProxyTypeFile)
+	if _, err := os.Stat(proxyTypePath); err == nil {
+		proxyTypeData, err := ioutil.ReadFile(proxyTypePath)
+		if err == nil && len(proxyTypeData) > 0 {
+			proxyType := strings.TrimSpace(string(proxyTypeData))
+			if proxyType == "http" || proxyType == "socks5" {
+				c.Proxy.Type = proxyType
+			}
 		}
 	}
 
@@ -179,10 +197,11 @@ func (c *Config) AddRegistryCredential(registry, username, password string) {
 }
 
 // SetProxy 设置代理配置
-func (c *Config) SetProxy(enabled bool, url string) {
+func (c *Config) SetProxy(enabled bool, proxyType, url string) {
 	c.mu.Lock()
 	defer c.mu.Unlock()
 	c.Proxy.Enabled = enabled
+	c.Proxy.Type = proxyType
 	c.Proxy.URL = url
 }
 
@@ -232,9 +251,9 @@ func (c *Config) GetNamespaceLimit(namespace string) (float64, bool) {
 }
 
 // GetProxyConfig 获取代理配置
-func (c *Config) GetProxyConfig() (bool, string) {
+func (c *Config) GetProxyConfig() (bool, string, string) {
 	c.mu.RLock()
 	defer c.mu.RUnlock()
 
-	return c.Proxy.Enabled, c.Proxy.URL
+	return c.Proxy.Enabled, c.Proxy.Type, c.Proxy.URL
 }
