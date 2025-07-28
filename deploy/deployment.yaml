@@ -1,56 +1,49 @@
 apiVersion: apps/v1
 kind: Deployment
 metadata:
-  name: imagesizegatekeeper
-  namespace: imagesizegatekeeper
+  name: image-size-gatekeeper
+  namespace: image-size-gatekeeper
   labels:
-    app: imagesizegatekeeper
+    app: image-size-gatekeeper
 spec:
-  replicas: 2
+  replicas: 1
   selector:
     matchLabels:
-      app: imagesizegatekeeper
+      app: image-size-gatekeeper
   template:
     metadata:
       labels:
-        app: imagesizegatekeeper
+        app: image-size-gatekeeper
     spec:
       containers:
-        - name: imagesizegatekeeper
-          image: docker.1ms.run/niehaoran/imagesizegatekeeper:latest
+        - name: webhook
+          image: demo.52013120.xyz/skopeo-webhook:latest
           imagePullPolicy: Always
           args:
-            - "--port=8443"
-            - "--tlsCertFile=/etc/webhook/certs/tls.crt"
-            - "--tlsKeyFile=/etc/webhook/certs/tls.key"
-            - "--configFile=/etc/webhook/config/config.json"
-            - "--secretsDir=/etc/webhook/secrets"
-          ports:
-            - containerPort: 8443
+            - "--config=/etc/webhook/config/config.yaml"
           volumeMounts:
-            - name: webhook-certs
-              mountPath: /etc/webhook/certs
-              readOnly: true
             - name: webhook-config
               mountPath: /etc/webhook/config
               readOnly: true
-            - name: webhook-secrets
-              mountPath: /etc/webhook/secrets
+            - name: webhook-certs
+              mountPath: /etc/webhook/certs
               readOnly: true
+          ports:
+            - containerPort: 8443
           resources:
             limits:
               cpu: "500m"
-              memory: "128Mi"
+              memory: "512Mi"
             requests:
               cpu: "100m"
-              memory: "64Mi"
+              memory: "128Mi"
           livenessProbe:
             httpGet:
               path: /healthz
               port: 8443
               scheme: HTTPS
-            initialDelaySeconds: 5
-            periodSeconds: 10
+            initialDelaySeconds: 10
+            periodSeconds: 20
           readinessProbe:
             httpGet:
               path: /healthz
@@ -59,12 +52,9 @@ spec:
             initialDelaySeconds: 5
             periodSeconds: 10
       volumes:
-        - name: webhook-certs
-          secret:
-            secretName: imagesizegatekeeper-certs
         - name: webhook-config
           configMap:
-            name: imagesizegatekeeper-config
-        - name: webhook-secrets
+            name: image-size-gatekeeper-config
+        - name: webhook-certs
           secret:
-            secretName: imagesizegatekeeper-secrets
+            secretName: webhook-tls 

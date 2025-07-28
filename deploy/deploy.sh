@@ -1,48 +1,28 @@
 #!/bin/bash
-
 set -e
 
-NAMESPACE="imagesizegatekeeper"
-DEPLOY_PROXY=false
+# 设置工作目录
+DIR="$( cd "$( dirname "${BASH_SOURCE[0]}" )" && pwd )"
+cd ${DIR}
 
-# 解析参数
-while [[ "$#" -gt 0 ]]; do
-    case $1 in
-        --deploy-proxy) DEPLOY_PROXY=true; shift ;;
-        *) echo "未知选项: $1"; exit 1 ;;
-    esac
-done
+# 创建命名空间
+kubectl apply -f namespace.yaml
 
-# 创建命名空间（如果不存在）
-kubectl get namespace $NAMESPACE > /dev/null 2>&1 || kubectl create namespace $NAMESPACE
+# 应用ConfigMap
+kubectl apply -f config.yaml
 
-echo "正在部署 ImageSizeGatekeeper..."
+# 生成证书并创建Secret
+./gen-certs.sh
 
-# 部署基础组件
-kubectl apply -f $(dirname "$0")/namespace.yaml
-kubectl apply -f $(dirname "$0")/config.yaml
-kubectl apply -f $(dirname "$0")/secrets.yaml
-kubectl apply -f $(dirname "$0")/self-signed-issuer.yaml
-kubectl apply -f $(dirname "$0")/certificate.yaml
-kubectl apply -f $(dirname "$0")/deployment.yaml
-kubectl apply -f $(dirname "$0")/service.yaml
-kubectl apply -f $(dirname "$0")/webhook.yaml
+# 获取CA证书
+CA_BUNDLE=$(kubectl get secret webhook-tls -n image-size-gatekeeper -o jsonpath="{.data.ca\.crt}")
 
-# 如果需要部署代理，则部署代理组件
-if [ "$DEPLOY_PROXY" = true ]; then
-    echo "正在部署 V2Ray 代理..."
-    
-    # 检查代理部署脚本是否存在
-    if [ -f "$(dirname "$0")/proxy/deploy.sh" ]; then
-        bash "$(dirname "$0")/proxy/deploy.sh"
-    else
-        echo "错误：找不到代理部署脚本 $(dirname "$0")/proxy/deploy.sh"
-        exit 1
-    fi
-    
-    echo "V2Ray 代理部署完成"
-fi
+# 替换webhook.yaml中的CA证书
+sed "s/\${CA_BUNDLE}/${CA_BUNDLE}/g" webhook.yaml > webhook-ca.yaml
 
-echo "ImageSizeGatekeeper 部署完成!"
-echo "可以使用以下命令查看Pod状态:"
-echo "  kubectl get pods -n $NAMESPACE" 
+# 部署应用
+kubectl apply -f deployment.yaml
+kubectl apply -f service.yaml
+kubectl apply -f webhook-ca.yaml
+
+echo "部署完成！" 

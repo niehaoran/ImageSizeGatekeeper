@@ -3,143 +3,114 @@ package admission
 import (
 	"encoding/json"
 	"fmt"
-	"io"
+	"io/ioutil"
 	"net/http"
+
+	"github.com/sirupsen/logrus"
 
 	admissionv1 "k8s.io/api/admission/v1"
 	corev1 "k8s.io/api/core/v1"
 	metav1 "k8s.io/apimachinery/pkg/apis/meta/v1"
-	"k8s.io/apimachinery/pkg/runtime"
-	"k8s.io/apimachinery/pkg/runtime/serializer"
 
-	"github.com/yourusername/imagesizegatekeeper/pkg/config"
-	"github.com/yourusername/imagesizegatekeeper/pkg/docker"
+	"github.com/ImageSizeGatekeeper/pkg/config"
+	"github.com/ImageSizeGatekeeper/pkg/docker"
 )
 
-var (
-	runtimeScheme = runtime.NewScheme()
-	codecs        = serializer.NewCodecFactory(runtimeScheme)
-	deserializer  = codecs.UniversalDeserializer()
+// 常量定义
+const (
+	// 指定原仓库的注解
+	OriginalRegistryAnnotation = "imagesizegatekeeper.k8s.io/original-registry"
+	// 指定认证Secret的注解
+	CredentialsSecretAnnotation = "imagesizegatekeeper.k8s.io/credentials-secret"
 )
 
-// ImageSizeWebhook 定义镜像大小验证的Webhook结构
-type ImageSizeWebhook struct {
-	// 配置
-	config *config.Config
-	// Docker Registry客户端
+// Webhook 定义了Admission Webhook的结构
+type Webhook struct {
+	config         *config.Config
 	registryClient *docker.RegistryClient
 }
 
-// NewImageSizeWebhook 创建一个新的ImageSizeWebhook实例
-func NewImageSizeWebhook(cfg *config.Config) *ImageSizeWebhook {
+// NewWebhook 创建一个新的Webhook实例
+func NewWebhook(cfg *config.Config) (*Webhook, error) {
 	registryClient := docker.NewRegistryClient(cfg)
-	return &ImageSizeWebhook{
+	return &Webhook{
 		config:         cfg,
 		registryClient: registryClient,
-	}
+	}, nil
 }
 
-// 处理/validate路径的HTTP请求
-func (w *ImageSizeWebhook) ServeHTTP(writer http.ResponseWriter, request *http.Request) {
-	fmt.Printf("收到请求: %s %s\n", request.Method, request.URL.Path)
+// Handle 处理admission webhook请求
+func (wh *Webhook) Handle(w http.ResponseWriter, r *http.Request) {
+	var body []byte
+	if r.Body != nil {
+		if data, err := ioutil.ReadAll(r.Body); err == nil {
+			body = data
+		}
+	}
 
-	if request.URL.Path != "/validate" {
-		http.Error(writer, "无效的路径", http.StatusNotFound)
+	if len(body) == 0 {
+		logrus.Error("Empty body")
+		http.Error(w, "Empty body", http.StatusBadRequest)
 		return
 	}
 
-	// 只处理POST请求
-	if request.Method != http.MethodPost {
-		http.Error(writer, "无效的方法", http.StatusMethodNotAllowed)
+	// 解析请求
+	admissionReview := admissionv1.AdmissionReview{}
+	if err := json.Unmarshal(body, &admissionReview); err != nil {
+		logrus.Errorf("解析admission请求失败: %v", err)
+		http.Error(w, fmt.Sprintf("解析admission请求失败: %v", err), http.StatusBadRequest)
 		return
 	}
 
-	// 读取请求体
-	body, err := io.ReadAll(request.Body)
-	if err != nil {
-		http.Error(writer, fmt.Sprintf("读取请求体失败: %v", err), http.StatusBadRequest)
-		return
-	}
-
-	// 设置响应类型
-	contentType := request.Header.Get("Content-Type")
-	if contentType != "application/json" {
-		http.Error(writer, "不支持的内容类型", http.StatusUnsupportedMediaType)
-		return
-	}
-
-	// 解析AdmissionReview请求
-	var admissionReview admissionv1.AdmissionReview
-	if _, _, err := deserializer.Decode(body, nil, &admissionReview); err != nil {
-		http.Error(writer, fmt.Sprintf("解析请求失败: %v", err), http.StatusBadRequest)
-		return
-	}
-
-	// 如果请求为空，返回错误
+	// 检查请求类型
 	if admissionReview.Request == nil {
-		http.Error(writer, "空的admission请求", http.StatusBadRequest)
+		logrus.Error("Invalid admission review request")
+		http.Error(w, "Invalid admission review request", http.StatusBadRequest)
 		return
 	}
 
-	fmt.Printf("解析请求成功: UID=%s, 资源类型=%s, 命名空间=%s\n",
-		admissionReview.Request.UID,
-		admissionReview.Request.Kind.Kind,
-		admissionReview.Request.Namespace)
+	// 处理请求
+	var result *admissionv1.AdmissionResponse
 
-	// 创建响应
-	admissionResponse := w.validate(admissionReview.Request)
-
-	// 创建完整的AdmissionReview响应
-	response := admissionv1.AdmissionReview{
-		TypeMeta: admissionReview.TypeMeta,
-		Response: admissionResponse,
-	}
-
-	// 确保设置了APIVersion和Kind
-	if response.TypeMeta.APIVersion == "" {
-		response.TypeMeta.APIVersion = "admission.k8s.io/v1"
-	}
-	if response.TypeMeta.Kind == "" {
-		response.TypeMeta.Kind = "AdmissionReview"
-	}
-
-	// 确保设置了请求UID (这一步应该是冗余的，但为了确保安全)
-	if response.Response != nil {
-		response.Response.UID = admissionReview.Request.UID
-		fmt.Printf("返回响应: UID=%s, allowed=%v\n",
-			response.Response.UID,
-			response.Response.Allowed)
-	}
-
-	// 序列化并返回响应
-	resp, err := json.Marshal(response)
-	if err != nil {
-		http.Error(writer, fmt.Sprintf("序列化响应失败: %v", err), http.StatusInternalServerError)
-		return
-	}
-
-	// 打印序列化后的响应用于调试
-	fmt.Printf("序列化响应: %s\n", string(resp))
-
-	// 设置响应头
-	writer.Header().Set("Content-Type", "application/json")
-	writer.WriteHeader(http.StatusOK)
-
-	// 写入响应体
-	if _, err := writer.Write(resp); err != nil {
-		fmt.Printf("写入响应失败: %v", err)
-	}
-}
-
-// validate 验证Pod是否满足镜像大小限制
-func (w *ImageSizeWebhook) validate(request *admissionv1.AdmissionRequest) *admissionv1.AdmissionResponse {
-	// 只处理Pod资源
-	if request.Kind.Kind != "Pod" {
-		return &admissionv1.AdmissionResponse{
-			UID:     request.UID, // 添加UID字段
+	// 针对Pod资源进行处理
+	if admissionReview.Request.Resource.Resource == "pods" {
+		result = wh.validatePod(admissionReview.Request)
+	} else {
+		// 对其他资源类型放行
+		result = &admissionv1.AdmissionResponse{
 			Allowed: true,
 			Result: &metav1.Status{
-				Message: "非Pod资源，跳过验证",
+				Message: "资源不是Pod，放行",
+			},
+		}
+	}
+
+	// 构建响应
+	admissionReview.Response = result
+	admissionReview.Response.UID = admissionReview.Request.UID
+
+	resp, err := json.Marshal(admissionReview)
+	if err != nil {
+		logrus.Errorf("序列化响应失败: %v", err)
+		http.Error(w, fmt.Sprintf("序列化响应失败: %v", err), http.StatusInternalServerError)
+		return
+	}
+
+	w.Header().Set("Content-Type", "application/json")
+	w.WriteHeader(http.StatusOK)
+	w.Write(resp)
+}
+
+// validatePod 验证Pod是否符合镜像大小限制
+func (wh *Webhook) validatePod(request *admissionv1.AdmissionRequest) *admissionv1.AdmissionResponse {
+	// 检查命名空间是否受限制
+	restriction := wh.config.GetNamespaceRestriction(request.Namespace)
+	if restriction == nil {
+		// 不受限制的命名空间，放行
+		return &admissionv1.AdmissionResponse{
+			Allowed: true,
+			Result: &metav1.Status{
+				Message: "命名空间不受限制，放行",
 			},
 		}
 	}
@@ -147,8 +118,8 @@ func (w *ImageSizeWebhook) validate(request *admissionv1.AdmissionRequest) *admi
 	// 解析Pod对象
 	var pod corev1.Pod
 	if err := json.Unmarshal(request.Object.Raw, &pod); err != nil {
+		logrus.Errorf("解析Pod对象失败: %v", err)
 		return &admissionv1.AdmissionResponse{
-			UID:     request.UID, // 添加UID字段
 			Allowed: false,
 			Result: &metav1.Status{
 				Message: fmt.Sprintf("解析Pod对象失败: %v", err),
@@ -156,26 +127,36 @@ func (w *ImageSizeWebhook) validate(request *admissionv1.AdmissionRequest) *admi
 		}
 	}
 
-	// 获取该命名空间的大小限制
-	maxSizeGB, hasLimit := w.config.GetNamespaceLimit(request.Namespace)
-	if !hasLimit {
-		// 如果没有限制，允许创建
+	// 获取原始仓库信息和认证Secret
+	originalRegistry := ""
+	credentialsSecret := "" // 存储认证Secret名称
+
+	if pod.Annotations != nil {
+		if reg, ok := pod.Annotations[OriginalRegistryAnnotation]; ok {
+			originalRegistry = reg
+		}
+		if secret, ok := pod.Annotations[CredentialsSecretAnnotation]; ok {
+			credentialsSecret = secret
+		}
+	}
+
+	// 如果需要指定原始仓库但没有提供
+	if restriction.RequireOrigReg && originalRegistry == "" {
 		return &admissionv1.AdmissionResponse{
-			UID:     request.UID, // 添加UID字段
-			Allowed: true,
+			Allowed: false,
 			Result: &metav1.Status{
-				Message: fmt.Sprintf("命名空间 %s 没有设置大小限制", request.Namespace),
+				Message: fmt.Sprintf("未指定原始仓库，请添加 %s 注解", OriginalRegistryAnnotation),
 			},
 		}
 	}
 
-	// 检查每个容器的镜像大小
-	for _, container := range pod.Spec.Containers {
-		// 获取镜像大小
-		imageInfo, err := w.registryClient.GetImageSize(container.Image)
+	// 检查所有容器的镜像大小
+	for _, container := range append(pod.Spec.Containers, pod.Spec.InitContainers...) {
+		// 获取镜像大小，传递认证Secret信息
+		sizeInMB, err := wh.registryClient.GetImageSizeMB(container.Image, originalRegistry, request.Namespace, credentialsSecret)
 		if err != nil {
+			logrus.Errorf("获取镜像大小失败: %v, 镜像: %s", err, container.Image)
 			return &admissionv1.AdmissionResponse{
-				UID:     request.UID, // 添加UID字段
 				Allowed: false,
 				Result: &metav1.Status{
 					Message: fmt.Sprintf("获取镜像 %s 大小失败: %v", container.Image, err),
@@ -184,55 +165,27 @@ func (w *ImageSizeWebhook) validate(request *admissionv1.AdmissionRequest) *admi
 		}
 
 		// 检查大小是否超过限制
-		if imageInfo.SizeGB > maxSizeGB {
+		if sizeInMB > restriction.MaxSizeMB {
+			logrus.Warnf("镜像大小超过限制: %s, 大小: %.2fMB, 限制: %.2fMB",
+				container.Image, sizeInMB, restriction.MaxSizeMB)
 			return &admissionv1.AdmissionResponse{
-				UID:     request.UID, // 添加UID字段
 				Allowed: false,
 				Result: &metav1.Status{
-					Message: fmt.Sprintf(
-						"拒绝创建Pod：镜像 %s 大小 %.2f GB 超过命名空间 %s 的限制 %.2f GB",
-						container.Image, imageInfo.SizeGB, request.Namespace, maxSizeGB,
-					),
+					Message: fmt.Sprintf("镜像 %s 大小 (%.2f MB) 超过限制 (%.2f MB)",
+						container.Image, sizeInMB, restriction.MaxSizeMB),
 				},
 			}
 		}
+
+		logrus.Infof("镜像大小检查通过: %s, 大小: %.2fMB, 限制: %.2fMB",
+			container.Image, sizeInMB, restriction.MaxSizeMB)
 	}
 
-	// 检查初始化容器
-	for _, container := range pod.Spec.InitContainers {
-		// 获取镜像大小
-		imageInfo, err := w.registryClient.GetImageSize(container.Image)
-		if err != nil {
-			return &admissionv1.AdmissionResponse{
-				UID:     request.UID, // 添加UID字段
-				Allowed: false,
-				Result: &metav1.Status{
-					Message: fmt.Sprintf("获取初始化容器镜像 %s 大小失败: %v", container.Image, err),
-				},
-			}
-		}
-
-		// 检查大小是否超过限制
-		if imageInfo.SizeGB > maxSizeGB {
-			return &admissionv1.AdmissionResponse{
-				UID:     request.UID, // 添加UID字段
-				Allowed: false,
-				Result: &metav1.Status{
-					Message: fmt.Sprintf(
-						"拒绝创建Pod：初始化容器镜像 %s 大小 %.2f GB 超过命名空间 %s 的限制 %.2f GB",
-						container.Image, imageInfo.SizeGB, request.Namespace, maxSizeGB,
-					),
-				},
-			}
-		}
-	}
-
-	// 所有检查都通过，允许创建
+	// 所有检查都通过
 	return &admissionv1.AdmissionResponse{
-		UID:     request.UID, // 添加UID字段
 		Allowed: true,
 		Result: &metav1.Status{
-			Message: "所有镜像大小都在限制范围内",
+			Message: "镜像大小检查通过",
 		},
 	}
 }

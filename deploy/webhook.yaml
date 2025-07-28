@@ -1,24 +1,24 @@
 apiVersion: admissionregistration.k8s.io/v1
 kind: ValidatingWebhookConfiguration
 metadata:
-  name: imagesizegatekeeper
-  annotations:
-    cert-manager.io/inject-ca-from: "imagesizegatekeeper/imagesizegatekeeper-cert"
+  name: image-size-gatekeeper
+  labels:
+    app: image-size-gatekeeper
 webhooks:
-  - name: imagesizegatekeeper.imagesizegatekeeper.svc
+  - name: image-size-validation.k8s.io
+    admissionReviewVersions: ["v1", "v1beta1"]
     sideEffects: None
-    admissionReviewVersions: ["v1"]
-    timeoutSeconds: 5
+    timeoutSeconds: 30
     failurePolicy: Fail
+    matchPolicy: Equivalent
     clientConfig:
       service:
-        namespace: imagesizegatekeeper
-        name: imagesizegatekeeper
-        path: "/validate"
-        port: 8443
-      # 使用cert-manager自动注入caBundle，这里无需手动设置
+        name: image-size-gatekeeper
+        namespace: image-size-gatekeeper
+        path: "/webhook"
+      caBundle: ${CA_BUNDLE}  # 这里需要替换为CA证书的Base64编码
     rules:
-      - operations: ["CREATE"]
+      - operations: ["CREATE", "UPDATE"]
         apiGroups: [""]
         apiVersions: ["v1"]
         resources: ["pods"]
@@ -26,4 +26,4 @@ webhooks:
       matchExpressions:
         - key: kubernetes.io/metadata.name
           operator: NotIn
-          values: ["kube-system", "imagesizegatekeeper"]
+          values: ["kube-system", "image-size-gatekeeper"] 

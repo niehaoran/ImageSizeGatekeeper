@@ -1,37 +1,42 @@
 apiVersion: v1
 kind: ConfigMap
 metadata:
-  name: imagesizegatekeeper-config
-  namespace: imagesizegatekeeper
+  name: image-size-gatekeeper-config
+  namespace: image-size-gatekeeper
 data:
   config.yaml: |
-    # 仓库映射配置
-    registryMappings:
-      # 用户使用的仓库地址 -> 实际请求API的仓库地址
-      - userRegistry: "docker.io"
-        actualRegistry: "registry-1.docker.io"
-      - userRegistry: "gcr.io"
-        actualRegistry: "gcr.io"
-
-    # 命名空间大小限制配置
-    namespaceLimits:
-      # 命名空间匹配模式（正则表达式）和对应的大小限制（GB）
-      - pattern: "^prod-.*$"
-        maxSizeGB: 5.0
-      - pattern: "^dev-.*$"
-        maxSizeGB: 10.0
-      - pattern: "^test-.*$"
-        maxSizeGB: 15.0
-      - pattern: ".*"
-        maxSizeGB: 8.0
-
+    # 服务器配置
+    port: 8443
+    tlsCertFile: "/etc/webhook/certs/tls.crt"
+    tlsKeyFile: "/etc/webhook/certs/tls.key"
+    logLevel: "info"
+    
     # 代理配置
-    proxy:
-      # 是否启用代理
-      enabled: false
-      # 代理类型: "none", "http", "socks5"
-      type: "none"
-      # 代理URL，取决于代理类型
-      # - HTTP代理示例: http://v2ray-proxy.imagesizegatekeeper.svc.cluster.local:8080
-      # - Socks代理示例: socks5://v2ray-proxy.imagesizegatekeeper.svc.cluster.local:1080
-      url: ""
+    proxyEnabled: false
+    proxyURL: ""  # 例如 "socks5h://username:password@host:port"
+    
+    # 命名空间限制配置
+    namespaceRestrictions:
+      # 精确匹配的命名空间
+      default:
+        enabled: true
+        maxSizeMB: 1000
+        requireOriginalRegistry: true
+      
+      test:
+        enabled: true
+        maxSizeMB: 500
+        requireOriginalRegistry: true
+        
+      # 正则表达式匹配的命名空间
+      "^user-.*$":
+        enabled: true
+        maxSizeMB: 300
+        requireOriginalRegistry: true
+        isRegex: true  # 启用正则表达式匹配
+        
+      "^team-.*$":
+        enabled: true
+        maxSizeMB: 800
+        requireOriginalRegistry: false
+        isRegex: true  # 启用正则表达式匹配 

@@ -1,14 +1,14 @@
 apiVersion: v1
 kind: Service
 metadata:
-  name: imagesizegatekeeper
-  namespace: imagesizegatekeeper
+  name: image-size-gatekeeper
+  namespace: image-size-gatekeeper
   labels:
-    app: imagesizegatekeeper
+    app: image-size-gatekeeper
 spec:
   ports:
-    - port: 8443
-      targetPort: 8443
-      protocol: TCP
+  - port: 443
+    targetPort: 8443
+    protocol: TCP
   selector:
-    app: imagesizegatekeeper
+    app: image-size-gatekeeper 

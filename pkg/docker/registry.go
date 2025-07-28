@@ -1,297 +1,243 @@
 package docker
 
 import (
+	"context"
 	"encoding/json"
 	"fmt"
-	"io"
-	"net/http"
-	"net/url"
-	"regexp"
+	"os/exec"
 	"strings"
 	"time"
 
-	"github.com/yourusername/imagesizegatekeeper/pkg/config"
-	"golang.org/x/net/proxy"
+	"github.com/sirupsen/logrus"
+
+	metav1 "k8s.io/apimachinery/pkg/apis/meta/v1"
+	"k8s.io/client-go/kubernetes"
+	"k8s.io/client-go/rest"
+
+	"github.com/ImageSizeGatekeeper/pkg/config"
 )
 
-// 常量定义
-const (
-	// 默认超时时间
-	defaultTimeout = 30 * time.Second
-	// Docker Registry API v2 基础路径
-	registryAPIv2 = "v2"
-)
-
-// ImageInfo 定义镜像信息
+// ImageInfo 包含镜像的大小信息
 type ImageInfo struct {
-	// 仓库名称
-	Repository string
-	// 镜像标签
-	Tag string
-	// 镜像大小（字节）
-	SizeBytes int64
-	// 镜像大小（GB，精确到小数点后两位）
-	SizeGB float64
+	CompressedSize   float64
+	UncompressedSize float64
+	HasAccurateSize  bool
 }
 
-// RegistryClient 定义Docker Registry客户端
+// RegistryAuth 存储从Secret中获取的认证信息
+type RegistryAuth struct {
+	Username string `json:"username"`
+	Password string `json:"password"`
+}
+
+// RegistryAuthMap 存储多个仓库的认证信息
+type RegistryAuthMap struct {
+	Registries map[string]RegistryAuth `json:"registries"`
+}
+
+// RegistryClient 用于与Docker镜像仓库交互
 type RegistryClient struct {
-	// HTTP客户端
-	client *http.Client
-	// 配置
-	cfg *config.Config
+	Config     *config.Config
+	KubeClient kubernetes.Interface // K8s客户端用于获取Secret
 }
 
-// RegistryCredentials 定义仓库认证凭据
-type RegistryCredentials struct {
-	Username string
-	Password string
-}
-
-// NewRegistryClient 创建一个新的Registry客户端
+// NewRegistryClient 创建一个新的Docker镜像仓库客户端
 func NewRegistryClient(cfg *config.Config) *RegistryClient {
-	client := &http.Client{
-		Timeout: defaultTimeout,
-	}
-
-	// 如果启用了代理，设置代理
-	proxyEnabled, proxyType, proxyURL := cfg.GetProxyConfig()
-	if proxyEnabled && proxyURL != "" {
-		transport := &http.Transport{}
-
-		switch proxyType {
-		case "http":
-			// HTTP代理
-			proxyURLParsed, err := url.Parse(proxyURL)
-			if err == nil {
-				transport.Proxy = http.ProxyURL(proxyURLParsed)
-				client.Transport = transport
-			}
-		case "socks5":
-			// Socks5代理
-			// 从URL中提取地址
-			proxyURLParsed, err := url.Parse(proxyURL)
-			if err == nil {
-				// 创建一个拨号器
-				dialer, err := proxy.SOCKS5("tcp", proxyURLParsed.Host, nil, proxy.Direct)
-				if err == nil {
-					// 设置自定义传输
-					transport.Dial = dialer.Dial
-					client.Transport = transport
-				}
-			}
-		}
+	// 创建K8s客户端
+	k8sClient, err := createK8sClient()
+	if err != nil {
+		logrus.Warnf("无法创建K8s客户端，将不能从Secret获取认证信息: %v", err)
 	}
 
 	return &RegistryClient{
-		client: client,
-		cfg:    cfg,
+		Config:     cfg,
+		KubeClient: k8sClient,
 	}
 }
 
-// parseImageName 解析镜像名称，返回仓库地址、仓库名和标签
-func parseImageName(imageName string) (string, string, string) {
-	// 默认使用docker.io作为仓库地址
-	registry := "docker.io"
-	repository := imageName
-	tag := "latest"
-
-	// 解析标签
-	parts := strings.Split(imageName, ":")
-	if len(parts) > 1 {
-		repository = parts[0]
-		tag = parts[1]
+// createK8sClient 创建Kubernetes客户端
+func createK8sClient() (kubernetes.Interface, error) {
+	// 使用集群内配置
+	config, err := rest.InClusterConfig()
+	if err != nil {
+		return nil, err
 	}
 
-	// 解析仓库地址
-	repoParts := strings.Split(repository, "/")
-	if len(repoParts) > 1 && strings.Contains(repoParts[0], ".") {
-		registry = repoParts[0]
-		repository = strings.Join(repoParts[1:], "/")
+	clientset, err := kubernetes.NewForConfig(config)
+	if err != nil {
+		return nil, err
 	}
 
-	return registry, repository, tag
+	return clientset, nil
 }
 
-// 解析WWW-Authenticate头
-func parseAuthHeader(authHeader string) (string, string, error) {
-	// 匹配Bearer realm="xxx",service="xxx"
-	re := regexp.MustCompile(`Bearer realm="([^"]+)",service="([^"]+)"`)
-	matches := re.FindStringSubmatch(authHeader)
-	if len(matches) < 3 {
-		return "", "", fmt.Errorf("无效的认证头: %s", authHeader)
+// GetImageSize 获取Docker镜像的大小信息
+// 基于image_size.sh脚本的逻辑
+func (c *RegistryClient) GetImageSize(image string, originalRegistry string, namespace string, credentialsSecret string) (*ImageInfo, error) {
+	// 检查镜像名是否带标签，未带则补全为:latest
+	if !strings.Contains(image, ":") {
+		image = image + ":latest"
 	}
-	return matches[1], matches[2], nil
+
+	// 构建镜像路径
+	targetImage := image
+	if originalRegistry != "" {
+		// 如果提供了原始仓库，使用它替换
+		parts := strings.SplitN(image, "/", 2)
+		if len(parts) == 2 {
+			targetImage = originalRegistry + "/" + parts[1]
+		}
+	}
+
+	// 尝试获取镜像信息
+	return c.fetchImageInfo(targetImage, namespace, credentialsSecret)
 }
 
-// 获取认证Token
-func (rc *RegistryClient) getAuthToken(realm, service, repository string, creds *RegistryCredentials) (string, error) {
-	// 构建token请求URL
-	tokenURL, err := url.Parse(realm)
+// fetchImageInfo 使用skopeo获取镜像信息
+func (c *RegistryClient) fetchImageInfo(image string, namespace string, credentialsSecret string) (*ImageInfo, error) {
+	// 构建skopeo命令
+	args := []string{"inspect"}
+
+	// 添加认证信息
+	registry := strings.Split(image, "/")[0]
+
+	// 首先尝试从Secret获取认证信息（如果提供了Secret）
+	if credentialsSecret != "" && c.KubeClient != nil {
+		auth, err := c.getAuthFromSecret(registry, namespace, credentialsSecret)
+		if err == nil && auth != nil {
+			logrus.Infof("使用Secret '%s' 中的认证信息访问仓库 '%s'", credentialsSecret, registry)
+			args = append(args, "--creds", fmt.Sprintf("%s:%s", auth.Username, auth.Password))
+		} else {
+			logrus.Warnf("无法从Secret获取认证信息: %v", err)
+		}
+	} else {
+		// 使用配置文件中的认证信息作为后备
+		auth := c.Config.GetRegistryAuth(registry)
+		if auth != nil {
+			args = append(args, "--creds", fmt.Sprintf("%s:%s", auth.Username, auth.Password))
+		}
+	}
+
+	// 添加镜像路径
+	args = append(args, "docker://"+image)
+
+	// 创建命令
+	cmd := exec.Command("skopeo", args...)
+
+	// 配置环境变量（代理）
+	env := []string{}
+	if c.Config.ProxyEnabled && c.Config.ProxyURL != "" {
+		env = append(env, "HTTPS_PROXY="+c.Config.ProxyURL, "HTTP_PROXY="+c.Config.ProxyURL)
+	}
+	cmd.Env = append(cmd.Environ(), env...)
+
+	// 设置超时
+	timer := time.AfterFunc(30*time.Second, func() {
+		cmd.Process.Kill()
+	})
+	defer timer.Stop()
+
+	// 执行命令
+	output, err := cmd.CombinedOutput()
 	if err != nil {
-		return "", fmt.Errorf("解析realm失败: %v", err)
+		logrus.Errorf("获取镜像信息失败: %v, 输出: %s", err, string(output))
+		if strings.Contains(string(output), "unauthorized") ||
+			strings.Contains(string(output), "forbidden") ||
+			strings.Contains(string(output), "not found") {
+			return nil, fmt.Errorf("权限不足或镜像不存在: %v", err)
+		}
+		return nil, fmt.Errorf("获取镜像信息失败: %v", err)
 	}
 
-	q := tokenURL.Query()
-	q.Add("service", service)
-	q.Add("scope", fmt.Sprintf("repository:%s:pull", repository))
-	tokenURL.RawQuery = q.Encode()
-
-	// 创建请求
-	req, err := http.NewRequest("GET", tokenURL.String(), nil)
-	if err != nil {
-		return "", fmt.Errorf("创建token请求失败: %v", err)
+	// 解析JSON响应
+	var result map[string]interface{}
+	if err := json.Unmarshal(output, &result); err != nil {
+		return nil, fmt.Errorf("解析镜像信息失败: %v", err)
 	}
 
-	// 添加认证信息（如果有）
-	if creds != nil && creds.Username != "" && creds.Password != "" {
-		req.SetBasicAuth(creds.Username, creds.Password)
+	// 提取层信息
+	layers, ok := result["LayersData"].([]interface{})
+	if !ok {
+		return nil, fmt.Errorf("未找到镜像层信息")
 	}
 
-	// 发送请求
-	resp, err := rc.client.Do(req)
-	if err != nil {
-		return "", fmt.Errorf("发送token请求失败: %v", err)
-	}
-	defer resp.Body.Close()
+	// 计算压缩和解压后的大小
+	var compressedSize float64
+	var uncompressedSize float64
+	var hasAccurateSize bool = true
 
-	if resp.StatusCode != http.StatusOK {
-		body, _ := io.ReadAll(resp.Body)
-		return "", fmt.Errorf("获取token失败，状态码: %d, 响应: %s", resp.StatusCode, string(body))
-	}
-
-	// 解析响应
-	var tokenResp struct {
-		Token       string `json:"token"`
-		AccessToken string `json:"access_token"`
-	}
-
-	if err := json.NewDecoder(resp.Body).Decode(&tokenResp); err != nil {
-		return "", fmt.Errorf("解析token响应失败: %v", err)
-	}
-
-	// 有些Registry返回token，有些返回access_token
-	token := tokenResp.Token
-	if token == "" {
-		token = tokenResp.AccessToken
-	}
-
-	if token == "" {
-		return "", fmt.Errorf("响应中没有token")
-	}
-
-	return token, nil
-}
-
-// GetImageSize 获取镜像大小
-func (rc *RegistryClient) GetImageSize(imageName string) (*ImageInfo, error) {
-	// 解析镜像名称
-	registry, repository, tag := parseImageName(imageName)
-
-	// 获取实际仓库地址（考虑加速站的情况）
-	actualRegistry := rc.cfg.GetActualRegistry(registry)
-
-	// 从配置获取认证信息
-	creds := rc.getCredentials(actualRegistry)
-
-	// 构建API请求URL
-	manifestURL := fmt.Sprintf("https://%s/%s/%s/manifests/%s",
-		actualRegistry, registryAPIv2, repository, tag)
-
-	// 创建请求
-	req, err := http.NewRequest("GET", manifestURL, nil)
-	if err != nil {
-		return nil, fmt.Errorf("创建请求失败: %v", err)
-	}
-
-	// 添加Accept头，请求Docker Registry API v2 schema 2
-	req.Header.Add("Accept", "application/vnd.docker.distribution.manifest.v2+json")
-
-	// 发送请求
-	resp, err := rc.client.Do(req)
-	if err != nil {
-		return nil, fmt.Errorf("发送请求失败: %v", err)
-	}
-	defer resp.Body.Close()
-
-	// 处理认证情况
-	if resp.StatusCode == http.StatusUnauthorized {
-		authHeader := resp.Header.Get("Www-Authenticate")
-		if authHeader == "" {
-			return nil, fmt.Errorf("需要认证，但没有提供认证方式")
+	for _, layer := range layers {
+		layerMap, ok := layer.(map[string]interface{})
+		if !ok {
+			continue
 		}
 
-		realm, service, err := parseAuthHeader(authHeader)
-		if err != nil {
-			return nil, fmt.Errorf("解析认证头失败: %v", err)
+		// 压缩大小
+		if size, ok := layerMap["Size"].(float64); ok {
+			compressedSize += size
 		}
 
-		// 获取token
-		token, err := rc.getAuthToken(realm, service, repository, creds)
-		if err != nil {
-			return nil, fmt.Errorf("获取token失败: %v", err)
+		// 解压大小
+		if size, ok := layerMap["UncompressedSize"].(float64); ok {
+			uncompressedSize += size
+		} else {
+			hasAccurateSize = false
 		}
-
-		// 使用token重新发送请求
-		req, err = http.NewRequest("GET", manifestURL, nil)
-		if err != nil {
-			return nil, fmt.Errorf("创建带认证的请求失败: %v", err)
-		}
-		req.Header.Add("Accept", "application/vnd.docker.distribution.manifest.v2+json")
-		req.Header.Add("Authorization", fmt.Sprintf("Bearer %s", token))
-
-		resp, err = rc.client.Do(req)
-		if err != nil {
-			return nil, fmt.Errorf("发送带认证的请求失败: %v", err)
-		}
-		defer resp.Body.Close()
 	}
 
-	if resp.StatusCode != http.StatusOK {
-		body, _ := io.ReadAll(resp.Body)
-		return nil, fmt.Errorf("请求失败，状态码: %d, 响应: %s", resp.StatusCode, string(body))
+	// 如果没有解压大小，使用估算值
+	if !hasAccurateSize || uncompressedSize == 0 {
+		uncompressedSize = compressedSize * 1.7 // 估算系数
 	}
-
-	// 解析响应
-	var manifest struct {
-		Config struct {
-			Size int64 `json:"size"`
-		} `json:"config"`
-		Layers []struct {
-			Size int64 `json:"size"`
-		} `json:"layers"`
-	}
-
-	if err := json.NewDecoder(resp.Body).Decode(&manifest); err != nil {
-		return nil, fmt.Errorf("解析响应失败: %v", err)
-	}
-
-	// 计算总大小：配置大小 + 所有层大小
-	var totalSize int64 = manifest.Config.Size
-	for _, layer := range manifest.Layers {
-		totalSize += layer.Size
-	}
-
-	// 转换为GB
-	sizeGB := float64(totalSize) / (1024 * 1024 * 1024)
 
 	return &ImageInfo{
-		Repository: repository,
-		Tag:        tag,
-		SizeBytes:  totalSize,
-		SizeGB:     sizeGB,
+		CompressedSize:   compressedSize,
+		UncompressedSize: uncompressedSize,
+		HasAccurateSize:  hasAccurateSize,
 	}, nil
 }
 
-// getCredentials 从配置获取仓库的认证信息
-func (rc *RegistryClient) getCredentials(registry string) *RegistryCredentials {
-	// 从配置中获取认证信息
-	username, password, found := rc.cfg.GetRegistryCredentials(registry)
-	if !found {
-		return nil
+// GetImageSizeMB 获取镜像大小（MB为单位）
+func (c *RegistryClient) GetImageSizeMB(image string, originalRegistry string, namespace string, credentialsSecret string) (float64, error) {
+	info, err := c.GetImageSize(image, originalRegistry, namespace, credentialsSecret)
+	if err != nil {
+		return 0, err
 	}
-	return &RegistryCredentials{
-		Username: username,
-		Password: password,
+	return info.UncompressedSize / 1024 / 1024, nil
+}
+
+// getAuthFromSecret 从Kubernetes Secret中获取认证信息
+func (c *RegistryClient) getAuthFromSecret(registry string, namespace string, secretName string) (*RegistryAuth, error) {
+	// 检查K8s客户端是否可用
+	if c.KubeClient == nil {
+		return nil, fmt.Errorf("无法访问Kubernetes API")
 	}
+
+	// 获取Secret
+	secret, err := c.KubeClient.CoreV1().Secrets(namespace).Get(context.TODO(), secretName, metav1.GetOptions{})
+	if err != nil {
+		return nil, fmt.Errorf("获取Secret失败: %v", err)
+	}
+
+	// 尝试解析auth.json格式
+	if data, ok := secret.Data["auth.json"]; ok {
+		var authMap RegistryAuthMap
+		if err := json.Unmarshal(data, &authMap); err == nil {
+			// 检查是否有当前仓库的认证信息
+			if auth, exists := authMap.Registries[registry]; exists {
+				return &auth, nil
+			}
+		}
+	}
+
+	// 尝试解析特定仓库的认证信息
+	if data, ok := secret.Data[registry]; ok {
+		var auth RegistryAuth
+		if err := json.Unmarshal(data, &auth); err == nil {
+			return &auth, nil
+		}
+	}
+
+	// 没有找到认证信息
+	return nil, fmt.Errorf("未找到仓库 %s 的认证信息", registry)
 }
